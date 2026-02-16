@@ -1,0 +1,4 @@
+tslearn
+matplotlib
+seaborn
+statsmodels
