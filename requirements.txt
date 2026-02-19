@@ -2,3 +2,4 @@ tslearn
 matplotlib
 seaborn
 statsmodels
+transformers
