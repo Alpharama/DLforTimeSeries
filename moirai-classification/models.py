@@ -1,5 +1,86 @@
 import torch
+from peft import LoraConfig, get_peft_model
 import torch.nn as nn
+from uni2ts.model.moirai import MoiraiModule
+from encoder import MoiraiEncoder
+
+
+def unfreeze_only_moirai_mask(encoder):
+    for param in encoder.parameters():
+        param.requires_grad = False
+    for name, param in encoder.named_parameters():
+        if "mask" in name.lower():
+            param.requires_grad = True
+
+
+
+
+class LoraHeadWrapper(nn.Module):
+    def __init__(self, head_class, head_kwargs, patch_size, num_vars, size="small", remove_last_patch=False, lora_r=8):
+        super().__init__()
+        
+        # 1. Load Base Moirai Module
+        base_module = MoiraiModule.from_pretrained(f"Salesforce/moirai-1.1-R-{size}")
+        
+        # 2. Inject LoRA adapters
+        lora_config = LoraConfig(
+            r=lora_r,                     # Rank of the adaptation matrices
+            lora_alpha=lora_r * 2,        # Scaling factor
+            target_modules="all-linear",  # Automatically targets all dense layers in Moirai
+            lora_dropout=0.05,
+            bias="none"
+        )
+        peft_module = get_peft_model(base_module, lora_config)
+        
+        # Print trainable parameters ratio
+        peft_module.print_trainable_parameters()
+        
+        # 3. Create the standard Moirai Encoder with the LoRA-infused module
+        moirai_enc = MoiraiEncoder(
+            module=peft_module,
+            prediction_length=patch_size, context_length=36, patch_size=patch_size, 
+            num_samples=100, target_dim=num_vars, feat_dynamic_real_dim=0, past_feat_dynamic_real_dim=0,
+        )
+        
+        # 4. Attach the classification head
+        head = head_class(**head_kwargs)
+        self.model = MoiraiClassifier(encoder=moirai_enc, head=head, remove_last_patch=remove_last_patch, num_vars=num_vars)
+
+    def forward(self, t, o, p):
+        return self.model(t, o, p)
+
+
+
+class FullMaskOnlyWrapper(nn.Module):
+    def __init__(self, patch_size, num_vars, num_classes, size="small"):
+        super().__init__()
+        moirai_enc = MoiraiEncoder(
+            module=MoiraiModule.from_pretrained(f"Salesforce/moirai-1.1-R-{size}"),
+            prediction_length=patch_size, context_length=36, patch_size=patch_size, 
+            num_samples=100, target_dim=num_vars, feat_dynamic_real_dim=0, past_feat_dynamic_real_dim=0,
+        )
+        # No freezing 
+        self.model = MoiraiMaskTuner(encoder=moirai_enc, num_vars=num_vars, num_classes=num_classes)
+
+    def forward(self, t, o, p):
+        return self.model(t, o, p)
+
+class FullHeadWrapper(nn.Module):
+    def __init__(self, head_class, head_kwargs, patch_size, num_vars, size="small", remove_last_patch=False):
+        super().__init__()
+        moirai_enc = MoiraiEncoder(
+            module=MoiraiModule.from_pretrained(f"Salesforce/moirai-1.1-R-{size}"),
+            prediction_length=patch_size, context_length=36, patch_size=patch_size, 
+            num_samples=100, target_dim=num_vars, feat_dynamic_real_dim=0, past_feat_dynamic_real_dim=0,
+        )
+        # No freezing!
+        head = head_class(**head_kwargs)
+        self.model = MoiraiClassifier(encoder=moirai_enc, head=head, remove_last_patch=remove_last_patch, num_vars=num_vars)
+
+    def forward(self, t, o, p):
+        return self.model(t, o, p)
+
+
 
 
 class MaskOnlyFinetunerWrapper(nn.Module):
@@ -36,7 +117,6 @@ class HeadFinetunerWrapper(nn.Module):
 
     def forward(self, t, o, p):
         return self.model(t, o, p)
-
 
 
 

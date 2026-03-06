@@ -5,9 +5,204 @@ import numpy as np
 import copy
 from sklearn.model_selection import train_test_split
 from torch.utils.data import TensorDataset, DataLoader
+from tslearn.datasets import UCR_UEA_datasets
+from sklearn.preprocessing import LabelEncoder
+
+
 
 
 NUM_VARS = 6
+
+#@torch.no_grad()
+def get_z_loaders(encoder, tr_loader, va_loader, te_loader, head_batch_size=256, device="cuda", remove_last_patch=True, num_vars=6):
+    encoder.eval()
+    encoder.to(device)
+    
+    def process_loader(loader):
+        Z_list, y_list = [], []
+        for b_t, b_o, b_p, b_y in loader:
+            b_t, b_o, b_p = b_t.to(device), b_o.to(device), b_p.to(device)
+            Z = encoder(b_t, b_o, b_p)
+            
+            if remove_last_patch:
+                B, S, F = Z.shape
+                P = S // num_vars
+                Z_reshaped = Z.view(B, num_vars, P, F)
+                Z_no_mask = Z_reshaped[:, :, :-1, :]
+                Z = Z_no_mask.reshape(B, -1, F)
+                
+            Z_list.append(Z.cpu())
+            y_list.append(b_y.cpu())
+        return torch.cat(Z_list), torch.cat(y_list)
+        
+    Z_tr, y_tr = process_loader(tr_loader)
+    Z_va, y_va = process_loader(va_loader)
+    Z_te, y_te = process_loader(te_loader)
+    
+    tr_z_loader = DataLoader(TensorDataset(Z_tr, y_tr), batch_size=head_batch_size, shuffle=True)
+    va_z_loader = DataLoader(TensorDataset(Z_va, y_va), batch_size=head_batch_size, shuffle=False)
+    te_z_loader = DataLoader(TensorDataset(Z_te, y_te), batch_size=head_batch_size, shuffle=False)
+    
+    return tr_z_loader, va_z_loader, te_z_loader
+
+
+def grid_search_heads(
+    head_class, head_kwargs, train_loader_z, val_loader_z, test_loader_z, 
+    lr_grid=[1e-3, 1e-4], wd_grid=[0.01, 0.05], epochs=50, device="cuda"
+):
+    best_overall_val_loss = float('inf')
+    best_model = None
+    criterion = nn.CrossEntropyLoss()
+    
+    for wd in wd_grid:
+        for lr in lr_grid:
+            head = head_class(**head_kwargs).to(device)
+            optimizer = torch.optim.AdamW(head.parameters(), lr=lr, weight_decay=wd)
+            
+            best_val_loss_local = float('inf')
+            best_head_weights = None
+            epochs_no_improve = 0
+            patience = 15
+            
+            for epoch in range(epochs):
+                head.train()
+                for b_z, b_y in train_loader_z:
+                    b_z, b_y = b_z.to(device), b_y.to(device)
+                    optimizer.zero_grad()
+                    loss = criterion(head(b_z), b_y)
+                    loss.backward()
+                    optimizer.step()
+                    
+                head.eval()
+                total_val_loss, total = 0.0, 0
+                with torch.no_grad():
+                    for b_z, b_y in val_loader_z:
+                        b_z, b_y = b_z.to(device), b_y.to(device)
+                        loss = criterion(head(b_z), b_y)
+                        total_val_loss += loss.item() * b_y.size(0)
+                        total += b_y.size(0)
+                
+                avg_val_loss = total_val_loss / total
+                if avg_val_loss < best_val_loss_local:
+                    best_val_loss_local = avg_val_loss
+                    best_head_weights = copy.deepcopy(head.state_dict())
+                    epochs_no_improve = 0
+                else:
+                    epochs_no_improve += 1
+                    
+                if epochs_no_improve >= patience: break
+                    
+            if best_val_loss_local < best_overall_val_loss:
+                best_overall_val_loss = best_val_loss_local
+                head.load_state_dict(best_head_weights)
+                best_model = copy.deepcopy(head)
+                
+    best_model.eval()
+    correct, total = 0, 0
+    with torch.no_grad():
+        for b_z, b_y in test_loader_z:
+            b_z, b_y = b_z.to(device), b_y.to(device)
+            preds = torch.argmax(best_model(b_z), dim=-1)
+            correct += (preds == b_y).sum().item()
+            total += b_y.size(0)
+            
+    return best_model, correct / total
+
+
+
+
+
+
+
+def universal_grid_search(
+    model_class, 
+    model_kwargs, 
+    train_loader, 
+    val_loader, 
+    test_loader, 
+    lr_grid=[1e-4, 5e-5], 
+    wd_grid=[0.01, 0.05], 
+    epochs=50,
+    device="cuda"
+):
+    best_overall_val_loss = float('inf')
+    best_model = None
+    
+    
+    for wd in wd_grid:
+        for lr in lr_grid:
+            print(f"LR={lr} | WD={wd}")
+            
+            model = model_class(**model_kwargs).to(device)
+            
+            val_loss, trained_model = train_finetune(
+                model=model, 
+                train_loader=train_loader, 
+                val_loader=val_loader,
+                lr=lr, 
+                epochs=epochs, 
+                weight_decay=wd, 
+                device=device
+            )
+            
+            if val_loss < best_overall_val_loss:
+                best_overall_val_loss = val_loss
+                best_model = copy.deepcopy(trained_model)
+                print(f"Val Loss: {val_loss:.4f}")
+            
+    best_model.eval()
+    correct, total = 0, 0
+    
+    with torch.no_grad():
+        for b_t, b_o, b_p, b_y in test_loader:
+            b_t, b_o, b_p, b_y = b_t.to(device), b_o.to(device), b_p.to(device), b_y.to(device)
+            
+            logits = best_model(b_t, b_o, b_p)
+            predictions = torch.argmax(logits, dim=-1)
+            
+            correct += (predictions == b_y).sum().item()
+            total += b_y.size(0)
+            
+    test_acc = correct / total
+    print(f"Acc on Test Set : {test_acc:.4f}\n")
+    
+    return best_model, test_acc
+
+
+
+
+
+
+
+def unfreeze_only_moirai_mask(encoder):
+    for param in encoder.parameters():
+        param.requires_grad = False
+    for name, param in encoder.named_parameters():
+        if "mask" in name.lower():
+            param.requires_grad = True
+
+
+def get_lsst_dataloaders(batch_size, device="cuda"):
+    ds = UCR_UEA_datasets()
+    X_train, y_train, X_test, y_test = ds.load_dataset("LSST")
+
+    le = LabelEncoder()
+    y_train_encoded = le.fit_transform(y_train)
+    y_test_encoded = le.transform(y_test)
+    num_classes = len(set(y_train_encoded))
+
+    X_tr_t, X_tr_o, X_tr_p = preprocess_data(X_train, device=device)
+    X_te_t, X_te_o, X_te_p = preprocess_data(X_test, device=device)
+
+    y_tr_t = torch.tensor(y_train_encoded, dtype=torch.long, device=device)
+    y_te_t = torch.tensor(y_test_encoded, dtype=torch.long, device=device)
+
+    tr_loader, va_loader = create_raw_dataloaders(X_tr_t, X_tr_o, X_tr_p, y_tr_t, batch_size=batch_size, device=device)
+    te_loader = DataLoader(TensorDataset(X_te_t, X_te_o, X_te_p, y_te_t), batch_size=batch_size, shuffle=False)
+    
+    return tr_loader, va_loader, te_loader, num_classes
+
+
 
 
 def grid_search_finetune(
@@ -329,13 +524,13 @@ def create_raw_dataloaders(
 
 def train_finetune(
     model, train_loader, val_loader, lr, 
-    epochs=50, weight_decay=0.01, device="cuda"
+    epochs=500, weight_decay=0.01, device="cuda"
 ):
     model.to(device)
     criterion = torch.nn.CrossEntropyLoss()
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
     
-    patience = 10
+    patience = 30
     epochs_no_improve = 0
     best_avg_val_loss = float('inf')
     best_model_weights = copy.deepcopy(model.state_dict())
