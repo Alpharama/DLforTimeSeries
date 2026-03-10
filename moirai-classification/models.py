@@ -1,5 +1,5 @@
 import torch
-from peft import LoraConfig, get_peft_model
+from peft import get_peft_model, LoraConfig, AdaLoraConfig
 import torch.nn as nn
 from uni2ts.model.moirai import MoiraiModule
 from encoder import MoiraiEncoder
@@ -12,43 +12,222 @@ def unfreeze_only_moirai_mask(encoder):
         if "mask" in name.lower():
             param.requires_grad = True
 
+class MultiScaleFullWrapper(nn.Module):
+    """
+    Wrapper pour le Full Fine-Tuning Multi-Échelles.
+    Instancie correctement 4 encodeurs Moirai (64, 32, 16, 8) et concatène leurs sorties.
+    """
+    def __init__(self, head_class, head_kwargs, num_vars=6, size="small", remove_last_patch=False):
+        super().__init__()
+        self.patch_sizes = [64, 32, 16, 8] 
+        self.num_vars = num_vars
+        self.remove_last_patch = remove_last_patch
+        
+        # Création correcte des 4 encodeurs Moirai indépendants
+        encoders_dict = {}
+        for p in self.patch_sizes:
+            # Il faut instancier le module HuggingFace pour chaque échelle
+            moirai_module = MoiraiModule.from_pretrained(f"Salesforce/moirai-1.1-R-{size}")
+            
+            enc = MoiraiEncoder(
+                module=moirai_module,
+                prediction_length=p,  # On suppose que DO_MASK=True, prediction_length = patch_size
+                context_length=36, 
+                patch_size=p, 
+                num_samples=100, 
+                target_dim=num_vars, 
+                feat_dynamic_real_dim=0, 
+                past_feat_dynamic_real_dim=0
+            )
+            encoders_dict[str(p)] = enc
+            
+        self.encoders = nn.ModuleDict(encoders_dict)
+        
+        # Initialisation de la tête (Flatten, Sequential ou Parallel)
+        self.head = head_class(**head_kwargs)
 
+    def forward(self, target, obs, pad):
+        features_list = []
+        
+        for p in self.patch_sizes:
+            # 1. Extraction des embeddings pour l'échelle courante
+            Z = self.encoders[str(p)](target, obs, pad)
+            
+            # 2. Retrait du masque (dernier patch) si demandé
+            if self.remove_last_patch:
+                B, S, F = Z.shape
+                P = S // self.num_vars
+                # Séparation pour enlever proprement le dernier patch de CHAQUE variable
+                Z_reshaped = Z.view(B, self.num_vars, P, F)
+                Z_no_mask = Z_reshaped[:, :, :-1, :]
+                Z = Z_no_mask.reshape(B, -1, F) # Retour à la shape (Batch, Seq, Features)
+                
+            features_list.append(Z)
+        
+        # 3. Concaténation sur la dimension de la séquence (dim=1)
+        # Forme résultante : (Batch, Seq_64 + Seq_32 + Seq_16 + Seq_8, Features)
+        concat_features = torch.cat(features_list, dim=1)
+        
+        # 4. Passage dans la tête multi-échelles
+        return self.head(concat_features)
 
+class MultiScaleSharedWrapper(nn.Module):
+    """
+    Wrapper pour le Full Fine-Tuning Multi-Échelles avec UN SEUL encodeur partagé.
+    Permet un gain massif de VRAM et force le modèle à apprendre une représentation universelle.
+    """
+    def __init__(self, head_class, head_kwargs, num_vars=6, size="small", remove_last_patch=False):
+        super().__init__()
+        self.patch_sizes = [64, 32, 16, 8] 
+        self.num_vars = num_vars
+        self.remove_last_patch = remove_last_patch
+        
+        # 1. On charge le Foundation Model UNE SEULE FOIS (Partage des poids)
+        shared_moirai = MoiraiModule.from_pretrained(f"Salesforce/moirai-1.1-R-{size}")
+        
+        # 2. On instancie 4 encodeurs qui pointent vers ce MÊME module
+        encoders_dict = {}
+        for p in self.patch_sizes:
+            enc = MoiraiEncoder(
+                module=shared_moirai, # <--- LA MAGIE EST ICI
+                prediction_length=p,  
+                context_length=36, 
+                patch_size=p, 
+                num_samples=100, 
+                target_dim=num_vars, 
+                feat_dynamic_real_dim=0, 
+                past_feat_dynamic_real_dim=0
+            )
+            encoders_dict[str(p)] = enc
+            
+        self.encoders = nn.ModuleDict(encoders_dict)
+        
+        # Initialisation de la tête
+        self.head = head_class(**head_kwargs)
+
+    def forward(self, target, obs, pad):
+        features_list = []
+        for p in self.patch_sizes:
+            # Extraction des embeddings pour l'échelle courante via l'encodeur partagé
+            Z = self.encoders[str(p)](target, obs, pad)
+            
+            # Retrait du masque si demandé
+            if self.remove_last_patch:
+                B, S, F = Z.shape
+                P = S // self.num_vars
+                Z_reshaped = Z.view(B, self.num_vars, P, F)
+                Z_no_mask = Z_reshaped[:, :, :-1, :]
+                Z = Z_no_mask.reshape(B, -1, F)
+                
+            features_list.append(Z)
+        
+        # Concaténation des 4 échelles
+        concat_features = torch.cat(features_list, dim=1)
+        
+        return self.head(concat_features)
+
+        
+class FlattenMultiScaleHead(nn.Module):
+    """
+    Tête Baseline : Fait un Mean Pooling sur les patchs de chaque échelle,
+    puis concatène (Flatten) le tout avant une couche linéaire.
+    """
+    def __init__(self, num_vars, num_classes, patches_counts, in_features=384):
+        super().__init__()
+        self.num_vars = num_vars
+        self.p_counts = patches_counts
+        
+        # Pour chaque échelle, on obtient (num_vars * in_features) après pooling
+        # Avec 4 échelles, l'entrée linéaire est 4 * num_vars * in_features
+        self.linear = nn.Linear(4 * num_vars * in_features, num_classes)
+        self.dropout = nn.Dropout(0.1)
+
+    def forward(self, x):
+        B = x.shape[0]
+        F = x.shape[-1]
+        
+        start = 0
+        pooled_list = []
+        
+        # Découpage du tenseur géant et pooling pour chaque échelle
+        for scale in [64, 32, 16, 8]:
+            length = self.num_vars * self.p_counts[scale]
+            x_scale = x[:, start : start + length, :]
+            start += length
+            
+            P = self.p_counts[scale]
+            x_reshaped = x_scale.view(B, self.num_vars, P, F)
+            
+            # Mean Pooling sur la dimension des patchs (dim=2)
+            pooled = x_reshaped.mean(dim=2).view(B, -1) 
+            pooled_list.append(pooled)
+            
+        # Concaténation des 4 représentations réduites
+        concat_pooled = torch.cat(pooled_list, dim=1)
+        return self.linear(self.dropout(concat_pooled))
+
+# Assure-toi d'importer ton MoiraiEncoder correctement
+# from encoder import MoiraiEncoder 
 
 class LoraHeadWrapper(nn.Module):
-    def __init__(self, head_class, head_kwargs, patch_size, num_vars, size="small", remove_last_patch=False, lora_r=8):
+    def __init__(
+        self, 
+        head_class, 
+        head_kwargs, 
+        patch_size, 
+        num_vars, 
+        size, 
+        remove_last_patch=False, 
+        lora_r=8, 
+        use_dora=False, 
+        use_adalora=False
+    ):
         super().__init__()
         
-        # 1. Load Base Moirai Module
-        base_module = MoiraiModule.from_pretrained(f"Salesforce/moirai-1.1-R-{size}")
-        
-        # 2. Inject LoRA adapters
-        lora_config = LoraConfig(
-            r=lora_r,                     # Rank of the adaptation matrices
-            lora_alpha=lora_r * 2,        # Scaling factor
-            target_modules="all-linear",  # Automatically targets all dense layers in Moirai
-            lora_dropout=0.05,
-            bias="none"
-        )
-        peft_module = get_peft_model(base_module, lora_config)
-        
-        # Print trainable parameters ratio
-        peft_module.print_trainable_parameters()
-        
-        # 3. Create the standard Moirai Encoder with the LoRA-infused module
-        moirai_enc = MoiraiEncoder(
-            module=peft_module,
+        # 1. Initialisation du modèle de base (Foundation Model)
+        self.encoder = MoiraiEncoder(
+            module=MoiraiModule.from_pretrained(f"Salesforce/moirai-1.1-R-{size}"),
             prediction_length=patch_size, context_length=36, patch_size=patch_size, 
             num_samples=100, target_dim=num_vars, feat_dynamic_real_dim=0, past_feat_dynamic_real_dim=0,
         )
         
-        # 4. Attach the classification head
-        head = head_class(**head_kwargs)
-        self.model = MoiraiClassifier(encoder=moirai_enc, head=head, remove_last_patch=remove_last_patch, num_vars=num_vars)
+        # Cibles classiques pour les couches d'attention (à adapter si Moirai a des noms différents)
+        # Par exemple : ["q_proj", "v_proj", "k_proj", "out_proj"] ou ["q", "v"]
+        target_modules = "all-linear"
+        
 
-    def forward(self, t, o, p):
-        return self.model(t, o, p)
-
+        if use_adalora:
+            peft_config = AdaLoraConfig(
+                target_r=lora_r,                
+                init_r=lora_r + 4,              
+                lora_alpha=lora_r * 2,
+                target_modules=target_modules,
+                tinit=200,                      
+                tfinal=1000,                    
+                deltaT=10,                      
+                total_step=3000
+            )
+        else:
+            peft_config = LoraConfig(
+                r=lora_r,
+                lora_alpha=lora_r * 2,
+                target_modules=target_modules,
+                use_dora=use_dora,              # True pour DoRA, False pour LoRA classique
+                # lora_dropout=0.05
+            )
+            
+        # Envelopper l'encodeur avec la configuration PEFT
+        self.encoder = get_peft_model(self.encoder, peft_config)
+        
+        # 3. Initialisation de la tête de classification/régression
+        self.head = head_class(**head_kwargs)
+        
+    def forward(self, target, obs, pad):
+        # Passage des 3 arguments dans l'encodeur (qui est maintenant un modèle PEFT)
+        features = self.encoder(target, obs, pad)
+        # Passage dans la tête spécifique
+        out = self.head(features)
+        return out
 
 
 class FullMaskOnlyWrapper(nn.Module):

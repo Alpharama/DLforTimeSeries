@@ -13,7 +13,7 @@ from sklearn.preprocessing import LabelEncoder
 
 NUM_VARS = 6
 
-#@torch.no_grad()
+@torch.no_grad()
 def get_z_loaders(encoder, tr_loader, va_loader, te_loader, head_batch_size=256, device="cuda", remove_last_patch=True, num_vars=6):
     encoder.eval()
     encoder.to(device)
@@ -48,7 +48,7 @@ def get_z_loaders(encoder, tr_loader, va_loader, te_loader, head_batch_size=256,
 
 def grid_search_heads(
     head_class, head_kwargs, train_loader_z, val_loader_z, test_loader_z, 
-    lr_grid=[1e-3, 1e-4], wd_grid=[0.01, 0.05], epochs=50, device="cuda"
+    lr_grid=[1e-3, 1e-4], wd_grid=[0.01, 0.05], epochs=500, device="cuda"
 ):
     best_overall_val_loss = float('inf')
     best_model = None
@@ -62,7 +62,7 @@ def grid_search_heads(
             best_val_loss_local = float('inf')
             best_head_weights = None
             epochs_no_improve = 0
-            patience = 15
+            patience = 20
             
             for epoch in range(epochs):
                 head.train()
@@ -122,8 +122,9 @@ def universal_grid_search(
     test_loader, 
     lr_grid=[1e-4, 5e-5], 
     wd_grid=[0.01, 0.05], 
-    epochs=50,
-    device="cuda"
+    epochs=500,
+    device="cuda",
+    verbose = False
 ):
     best_overall_val_loss = float('inf')
     best_model = None
@@ -142,7 +143,8 @@ def universal_grid_search(
                 lr=lr, 
                 epochs=epochs, 
                 weight_decay=wd, 
-                device=device
+                device=device,
+                verbose=verbose
             )
             
             if val_loss < best_overall_val_loss:
@@ -204,46 +206,6 @@ def get_lsst_dataloaders(batch_size, device="cuda"):
 
 
 
-
-def grid_search_finetune(
-    model_class, model_kwargs, train_loader, val_loader, test_loader, device="cuda"
-):
-    # Grille de paramètres adaptée au Fine-Tuning
-    lr_grid = [1e-4, 5e-5]
-    wd_grid = [0.01, 0.05]
-    
-    best_overall_val_loss = float('inf')
-    best_model = None
-    
-    for wd in wd_grid:
-        for lr in lr_grid:
-            print(f"      [GridSearch] Test avec LR={lr} | WD={wd}")
-            
-            # 💡 C'est ici que le modèle se ré-instancie à neuf !
-            model = model_class(**model_kwargs).to(device)
-            
-            val_loss, trained_model = train_finetune(
-                model=model, train_loader=train_loader, val_loader=val_loader,
-                lr=lr, epochs=50, weight_decay=wd, device=device
-            )
-            
-            if val_loss < best_overall_val_loss:
-                best_overall_val_loss = val_loss
-                best_model = copy.deepcopy(trained_model)     
-            
-    # Évaluation du meilleur modèle sur le test set
-    best_model.eval()
-    correct, total = 0, 0
-    with torch.no_grad():
-        for b_t, b_o, b_p, b_y in test_loader:
-            b_t, b_o, b_p, b_y = b_t.to(device), b_o.to(device), b_p.to(device), b_y.to(device)
-            logits = best_model(b_t, b_o, b_p)
-            predictions = torch.argmax(logits, dim=-1)
-            correct += (predictions == b_y).sum().item()
-            total += b_y.size(0)
-            
-    test_acc = correct / total
-    return best_model, test_acc
 
 
 
@@ -405,48 +367,7 @@ def train(
     model.load_state_dict(best_model_weights)
     return best_avg_val_loss, model
 
-def grid_search_attention_model(
-    model_class, model_kwargs, train_loader, val_loader, test_loader, device="cuda", f_train = train
-):
-    lr_grid = [1e-4]
-    wd_grid = [0.0, 0.05, 0.1, 0.2] 
-    
-    best_overall_val_loss = float('inf')
-    best_lr = None
-    best_wd = None
-    best_model = None
-    
-    for wd in wd_grid:
-        for lr in lr_grid:
-            model = model_class(**model_kwargs).to(device)
-            val_loss, trained_model = f_train(
-                model=model, train_loader=train_loader, val_loader=val_loader,
-                lr=lr, epochs=500, weight_decay=wd, device=device
-            )
-            
-            if val_loss < best_overall_val_loss:
-                best_overall_val_loss = val_loss
-                best_lr = lr
-                best_wd = wd
-                best_model = copy.deepcopy(trained_model)     
-            
-    best_model.eval()
-    correct, total = 0, 0
-    with torch.no_grad():
-        for batch_z, batch_y in test_loader:
-            batch_z, batch_y = batch_z.to(device), batch_y.to(device)
-            logits = best_model(batch_z)
-            predictions = torch.argmax(logits, dim=-1)
-            correct += (predictions == batch_y).sum().item()
-            total += batch_y.size(0)
-            
-    test_acc = correct / total
-    return best_model, test_acc
 
-
-# ==========================================
-# 2. GÉNÉRATEURS DE DATALOADERS (Sécurisés et Indépendants)
-# ==========================================
 def create_single_scale_dataloaders(Z_train, Z_test, y_train, y_test, batch_size=256, device="cuda"):
     """Crée les dataloaders pour une seule taille de patch (ex: juste 16)"""
     Z_train_np = Z_train.cpu().numpy()
@@ -524,17 +445,19 @@ def create_raw_dataloaders(
 
 def train_finetune(
     model, train_loader, val_loader, lr, 
-    epochs=500, weight_decay=0.01, device="cuda"
+    epochs=500, weight_decay=0.01, device="cuda", verbose = False
 ):
     model.to(device)
     criterion = torch.nn.CrossEntropyLoss()
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
     
-    patience = 30
+    patience = 5
     epochs_no_improve = 0
     best_avg_val_loss = float('inf')
     best_model_weights = copy.deepcopy(model.state_dict())
     
+    global_step = 0
+
     for epoch in range(epochs):
         model.train()
         for b_target, b_obs, b_pad, b_y in train_loader:
@@ -543,6 +466,11 @@ def train_finetune(
             loss = criterion(logits, b_y)
             loss.backward()
             optimizer.step()
+            
+            global_step += 1
+            # On vérifie si le modèle possède la structure d'AdaLoRA avant d'appeler la fonction
+            if hasattr(model, "encoder") and hasattr(model.encoder, "base_model") and hasattr(model.encoder.base_model, "update_and_allocate"):
+                model.encoder.base_model.update_and_allocate(global_step)
 
         model.eval()
         total_val_loss, total = 0.0, 0
@@ -554,6 +482,9 @@ def train_finetune(
                 total += b_y.size(0)
                 
         avg_val_loss = total_val_loss / total
+
+        if verbose : 
+            print(avg_val_loss)
         
         if avg_val_loss < best_avg_val_loss:
             best_avg_val_loss = avg_val_loss

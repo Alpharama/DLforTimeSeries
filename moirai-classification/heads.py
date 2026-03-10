@@ -159,36 +159,6 @@ class HierarchicalMultiHeadClassifier(nn.Module):
 # ==========================================
 # 3. CROSS-SCALE (MULTI-PATCH) ATTENTION
 # ==========================================
-class CrossScaleMultiHeadClassifier(nn.Module):
-    def __init__(self, num_vars, num_classes, num_patches_q, num_patches_kv, in_features=384, num_heads=8):
-        super().__init__()
-        self.num_vars = num_vars
-        self.num_patches_q = num_patches_q
-        self.num_patches_kv = num_patches_kv
-        self.seq_len_q = num_vars * num_patches_q
-        
-        self.cross_attn = nn.MultiheadAttention(embed_dim=in_features, num_heads=num_heads, dropout=0.1, batch_first=True)
-        self.dropout = nn.Dropout(0.1)
-        self.linear = nn.Linear(num_vars * in_features, num_classes)
-
-    def forward(self, x):
-        x_q = x[:, :self.seq_len_q, :]   
-        x_kv = x[:, self.seq_len_q:, :]  
-        B, _, F = x.shape
-        
-        x_q_reshaped = x_q.reshape(B, self.num_vars, self.num_patches_q, F)
-        x_q_first = x_q_reshaped[:, :, 0:1, :] 
-        seq_q = x_q_first.reshape(B * self.num_vars, 1, F) 
-        
-        seq_kv = x_kv.reshape(B * self.num_vars, self.num_patches_kv, F) 
-        
-        fused_seq, _ = self.cross_attn(query=seq_q, key=seq_kv, value=seq_kv)
-        fused_seq = seq_q + fused_seq
-        
-        pooled_flat = fused_seq.squeeze(1) 
-        final_repr = pooled_flat.reshape(B, -1) 
-        return self.linear(self.dropout(final_repr))
-
 class SequentialCrossScaleClassifier(nn.Module):
     def __init__(self, num_vars, num_classes, patches_counts, in_features=384, num_heads=8, shared_layer=False):
         super().__init__()
