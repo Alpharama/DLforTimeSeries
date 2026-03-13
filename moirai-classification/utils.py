@@ -46,91 +46,10 @@ def get_z_loaders(encoder, tr_loader, va_loader, te_loader, head_batch_size=256,
     
     return tr_z_loader, va_z_loader, te_z_loader
 
-"""
-def grid_search_heads(
-    head_class, head_kwargs, train_loader_z, val_loader_z, test_loader_z, 
-    lr_grid=[1e-3, 1e-4], wd_grid=[0.01, 0.05], epochs=500, device="cuda"
-):
-    best_overall_val_loss = float('inf')
-    best_model = None
-    criterion = nn.CrossEntropyLoss()
-    
-    for wd in wd_grid:
-        for lr in lr_grid:
-            head = head_class(**head_kwargs).to(device)
-            optimizer = torch.optim.AdamW(head.parameters(), lr=lr, weight_decay=wd)
-            
-            best_val_loss_local = float('inf')
-            best_head_weights = None
-            epochs_no_improve = 0
-            patience = 20
-            
-            for epoch in range(epochs):
-                head.train()
-                for b_z, b_y in train_loader_z:
-                    b_z, b_y = b_z.to(device), b_y.to(device)
-                    optimizer.zero_grad()
-                    loss = criterion(head(b_z), b_y)
-                    loss.backward()
-                    optimizer.step()
-                    
-                head.eval()
-                total_val_loss, total = 0.0, 0
-                with torch.no_grad():
-                    for b_z, b_y in val_loader_z:
-                        b_z, b_y = b_z.to(device), b_y.to(device)
-                        loss = criterion(head(b_z), b_y)
-                        total_val_loss += loss.item() * b_y.size(0)
-                        total += b_y.size(0)
-                
-                avg_val_loss = total_val_loss / total
-                if avg_val_loss < best_val_loss_local:
-                    best_val_loss_local = avg_val_loss
-                    best_head_weights = copy.deepcopy(head.state_dict())
-                    epochs_no_improve = 0
-                else:
-                    epochs_no_improve += 1
-                    
-                if epochs_no_improve >= patience: break
-                    
-            if best_val_loss_local < best_overall_val_loss:
-                best_overall_val_loss = best_val_loss_local
-                head.load_state_dict(best_head_weights)
-                best_model = copy.deepcopy(head)
-                
-    best_model.eval()
-    
-    # --- NOUVEAU : Collecte de toutes les prédictions ---
-    all_preds = []
-    all_targets = []
-    
-    with torch.no_grad():
-        for b_z, b_y in test_loader_z:
-            b_z, b_y = b_z.to(device), b_y.to(device)
-            preds = torch.argmax(best_model(b_z), dim=-1)
-            
-            all_preds.extend(preds.cpu().numpy())
-            all_targets.extend(b_y.cpu().numpy())
-            
-    # --- Calcul et Affichage des Métriques Avancées ---
-    print("\n" + "-"*40)
-    print("📊 ÉVALUATION SUR LE TEST SET (HEADS)")
-    print("-" * 40)
-    print(classification_report(all_targets, all_preds, digits=4))
-    
-    metrics = {
-        "Accuracy": accuracy_score(all_targets, all_preds),
-        "Macro F1": f1_score(all_targets, all_preds, average="macro"),
-        "Weighted F1": f1_score(all_targets, all_preds, average="weighted")
-    }
-            
-    return best_model, metrics"""
-
 
 def grid_search_heads(
     head_class, head_kwargs, train_loader_z, val_loader_z, test_loader_z, 
     lr_grid=[1e-3, 1e-4], wd_grid=[0.01, 0.05], epochs=500, device="cuda",
-    patch_size=None  # <-- NOUVEL ARGUMENT
 ):
     best_overall_val_loss = float('inf')
     best_model = None
@@ -181,7 +100,6 @@ def grid_search_heads(
                 
     best_model.eval()
     
-    # --- Collecte de toutes les prédictions ---
     all_preds = []
     all_targets = []
     
@@ -205,69 +123,6 @@ def grid_search_heads(
     })
             
     return best_model, metrics
-"""
-def grid_search_heads(
-    head_class, head_kwargs, train_loader_z, val_loader_z, test_loader_z, 
-    lr_grid=[1e-3, 1e-4], wd_grid=[0.01, 0.05], epochs=500, device="cuda"
-):
-    best_overall_val_loss = float('inf')
-    best_model = None
-    criterion = nn.CrossEntropyLoss()
-    
-    for wd in wd_grid:
-        for lr in lr_grid:
-            head = head_class(**head_kwargs).to(device)
-            optimizer = torch.optim.AdamW(head.parameters(), lr=lr, weight_decay=wd)
-            
-            best_val_loss_local = float('inf')
-            best_head_weights = None
-            epochs_no_improve = 0
-            patience = 20
-            
-            for epoch in range(epochs):
-                head.train()
-                for b_z, b_y in train_loader_z:
-                    b_z, b_y = b_z.to(device), b_y.to(device)
-                    optimizer.zero_grad()
-                    loss = criterion(head(b_z), b_y)
-                    loss.backward()
-                    optimizer.step()
-                    
-                head.eval()
-                total_val_loss, total = 0.0, 0
-                with torch.no_grad():
-                    for b_z, b_y in val_loader_z:
-                        b_z, b_y = b_z.to(device), b_y.to(device)
-                        loss = criterion(head(b_z), b_y)
-                        total_val_loss += loss.item() * b_y.size(0)
-                        total += b_y.size(0)
-                
-                avg_val_loss = total_val_loss / total
-                if avg_val_loss < best_val_loss_local:
-                    best_val_loss_local = avg_val_loss
-                    best_head_weights = copy.deepcopy(head.state_dict())
-                    epochs_no_improve = 0
-                else:
-                    epochs_no_improve += 1
-                    
-                if epochs_no_improve >= patience: break
-                    
-            if best_val_loss_local < best_overall_val_loss:
-                best_overall_val_loss = best_val_loss_local
-                head.load_state_dict(best_head_weights)
-                best_model = copy.deepcopy(head)
-                
-    best_model.eval()
-    correct, total = 0, 0
-    with torch.no_grad():
-        for b_z, b_y in test_loader_z:
-            b_z, b_y = b_z.to(device), b_y.to(device)
-            preds = torch.argmax(best_model(b_z), dim=-1)
-            correct += (preds == b_y).sum().item()
-            total += b_y.size(0)
-            
-    return best_model, correct / total
-"""
 
 
 def universal_grid_search(
@@ -334,144 +189,6 @@ def universal_grid_search(
     })
     
     return best_model, metrics
-"""
-def universal_grid_search(
-    model_class, 
-    model_kwargs, 
-    train_loader, 
-    val_loader, 
-    test_loader, 
-    lr_grid=[1e-4, 5e-5], 
-    wd_grid=[0.01, 0.05], 
-    epochs=500,
-    device="cuda",
-    verbose = False
-):
-    best_overall_val_loss = float('inf')
-    best_model = None
-    
-    for wd in wd_grid:
-        for lr in lr_grid:
-            print(f"LR={lr}| WD={wd}")
-            
-            model = model_class(**model_kwargs).to(device)
-            
-            val_loss, trained_model = train_finetune(
-                model=model, 
-                train_loader=train_loader, 
-                val_loader=val_loader,
-                lr=lr, 
-                epochs=epochs, 
-                weight_decay=wd, 
-                device=device,
-                verbose = verbose
-            )
-            
-            if val_loss < best_overall_val_loss:
-                best_overall_val_loss = val_loss
-                best_model = copy.deepcopy(trained_model)
-            print(f"Val Loss: {val_loss:.4f}")
-            
-    best_model.eval()
-    
-    # --- NOUVEAU : Collecte de toutes les prédictions ---
-    all_preds = []
-    all_targets = []
-    
-    with torch.no_grad():
-        for b_t, b_o, b_p, b_y in test_loader:
-            b_t, b_o, b_p = b_t.to(device), b_o.to(device), b_p.to(device)
-            
-            logits = best_model(b_t, b_o, b_p)
-            predictions = torch.argmax(logits, dim=-1)
-            
-            all_preds.extend(predictions.cpu().numpy())
-            all_targets.extend(b_y.cpu().numpy())
-            
-    # --- Calcul et Affichage des Métriques Avancées ---
-    print("\n" + "-"*40)
-    print("📊 ÉVALUATION SUR LE TEST SET")
-    print("-"*40)
-    print(classification_report(all_targets, all_preds, digits=4))
-    
-    metrics = {
-        "Accuracy": accuracy_score(all_targets, all_preds),
-        "Macro F1": f1_score(all_targets, all_preds, average="macro"),
-        "Weighted F1": f1_score(all_targets, all_preds, average="weighted")
-    }
-    
-    return best_model, metrics
-"""
-"""
-
-def universal_grid_search(
-    model_class, 
-    model_kwargs, 
-    train_loader, 
-    val_loader, 
-    test_loader, 
-    lr_grid=[1e-4, 5e-5], 
-    wd_grid=[0.01, 0.05], 
-    epochs=500,
-    device="cuda",
-    verbose = False
-):
-    best_overall_val_loss = float('inf')
-    best_model = None
-    
-    
-    for wd in wd_grid:
-        for lr in lr_grid:
-            print(f"LR={lr} | WD={wd}")
-            
-            model = model_class(**model_kwargs).to(device)
-            
-            val_loss, trained_model = train_finetune(
-                model=model, 
-                train_loader=train_loader, 
-                val_loader=val_loader,
-                lr=lr, 
-                epochs=epochs, 
-                weight_decay=wd, 
-                device=device,
-                verbose=verbose
-            )
-            
-            if val_loss < best_overall_val_loss:
-                best_overall_val_loss = val_loss
-                best_model = copy.deepcopy(trained_model)
-                print(f"Val Loss: {val_loss:.4f}")
-            
-    best_model.eval()
-    correct, total = 0, 0
-    
-    with torch.no_grad():
-        for b_t, b_o, b_p, b_y in test_loader:
-            b_t, b_o, b_p, b_y = b_t.to(device), b_o.to(device), b_p.to(device), b_y.to(device)
-            
-            logits = best_model(b_t, b_o, b_p)
-            predictions = torch.argmax(logits, dim=-1)
-            
-            correct += (predictions == b_y).sum().item()
-            total += b_y.size(0)
-            
-    test_acc = correct / total
-    print(f"Acc on Test Set : {test_acc:.4f}\n")
-    
-    return best_model, test_acc
-"""
-
-
-
-
-
-
-def unfreeze_only_moirai_mask(encoder):
-    for param in encoder.parameters():
-        param.requires_grad = False
-    for name, param in encoder.named_parameters():
-        if "mask" in name.lower():
-            param.requires_grad = True
 
 
 def get_lsst_dataloaders(batch_size, device="cuda"):
@@ -502,13 +219,10 @@ def get_lsst_dataloaders(batch_size, device="cuda"):
 
 def apply_pooling_pt(Z_tensor, method, num_vars=NUM_VARS):
     N, S, F = Z_tensor.shape
-    P = S // num_vars # Calcul automatique du nombre de patches par variable
-    
-    # On reshape le tenseur pour séparer les Variables et les Patches
-    # Forme résultante : (Batch, Variables, Patches, Features)
+    P = S // num_vars 
+
     Z_reshaped = Z_tensor.view(N, num_vars, P, F)
     
-    # Basique et Global
     if method == "flatten":
         return Z_tensor.reshape(N, -1)
         
@@ -528,8 +242,6 @@ def apply_pooling_pt(Z_tensor, method, num_vars=NUM_VARS):
             Z_tensor.min(dim=1).values
         ], dim=1)
 
-    # Pooling sur les Patches (on garde les variables distinctes) ---
-    # Réduction sur la dimension 2 (Patches). Résultat : (N, num_vars, F), puis on aplatit
     elif method == "mean_over_patches":
         return Z_reshaped.mean(dim=2).reshape(N, -1)
         
@@ -545,8 +257,6 @@ def apply_pooling_pt(Z_tensor, method, num_vars=NUM_VARS):
         p_min  = Z_reshaped.min(dim=2).values.reshape(N, -1)
         return torch.cat([p_mean, p_max, p_min], dim=1)
 
-    # Pooling sur les Variables (on synchronise les patches entre variables) ---
-    # Réduction sur la dimension 1 (Variables). Résultat : (N, P, F), puis on aplatit
     elif method == "mean_over_variables":
         return Z_reshaped.mean(dim=1).reshape(N, -1)
         
@@ -602,107 +312,11 @@ def preprocess_data(
 
     return past_target, past_observed_target, past_is_pad
 
-# ==========================================
-# 1. FONCTIONS D'ENTRAÎNEMENT
-# ==========================================
-def train(
-    model, train_loader, val_loader, lr, 
-    epochs=100, weight_decay=0.005, device="cuda"
-):
-    model.to(device)
-    criterion = nn.CrossEntropyLoss()
-    optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
-    
-    patience = 50
-    epochs_no_improve = 0
-    best_avg_val_loss = float('inf')
-    best_model_weights = copy.deepcopy(model.state_dict())
-    
-    for epoch in range(epochs):
-        model.train()
-        for batch_z, batch_y in train_loader:
-            batch_z, batch_y = batch_z.to(device), batch_y.to(device)
-            optimizer.zero_grad()
-            logits = model(batch_z)
-            loss = criterion(logits, batch_y)
-            loss.backward()
-            optimizer.step()
 
-        model.eval()
-        total_val_loss = 0.0
-        total = 0
-        
-        with torch.no_grad():
-            for batch_z, batch_y in val_loader:
-                batch_z, batch_y = batch_z.to(device), batch_y.to(device)
-                logits = model(batch_z)
-                loss = criterion(logits, batch_y)
-                total_val_loss += loss.item() * batch_y.size(0)
-                total += batch_y.size(0)
-                
-        avg_val_loss = total_val_loss / total
-        
-        # Early stopping logic
-        if avg_val_loss < best_avg_val_loss:
-            best_avg_val_loss = avg_val_loss
-            best_model_weights = copy.deepcopy(model.state_dict())
-            epochs_no_improve = 0
-        else:
-            epochs_no_improve += 1
-            
-        if epochs_no_improve >= patience:
-            # print(f'Early stop at epoch {epoch}') # Décommenter pour debug
-            break
-            
-    model.load_state_dict(best_model_weights)
-    return best_avg_val_loss, model
-
-
-def create_single_scale_dataloaders(Z_train, Z_test, y_train, y_test, batch_size=256, device="cuda"):
-    """Crée les dataloaders pour une seule taille de patch (ex: juste 16)"""
-    Z_train_np = Z_train.cpu().numpy()
-    y_train_np = y_train.cpu().numpy()
-    
-    Z_tr_split, Z_va_split, y_tr_split, y_va_split = train_test_split(
-        Z_train_np, y_train_np, test_size=0.2, random_state=42, stratify=y_train_np
-    )
-    
-    Z_tr = torch.tensor(Z_tr_split, device=device)
-    y_tr = torch.tensor(y_tr_split, dtype=torch.long, device=device)
-    Z_va = torch.tensor(Z_va_split, device=device)
-    y_va = torch.tensor(y_va_split, dtype=torch.long, device=device)
-    
-    tr_loader = DataLoader(TensorDataset(Z_tr, y_tr), batch_size=batch_size, shuffle=True)
-    va_loader = DataLoader(TensorDataset(Z_va, y_va), batch_size=batch_size, shuffle=False)
-    te_loader = DataLoader(TensorDataset(Z_test.to(device), y_test.to(device)), batch_size=batch_size, shuffle=False)
-    
-    return tr_loader, va_loader, te_loader
-
-def create_all_scales_dataloaders(Z_train_dict, Z_test_dict, scales, y_train, y_test, batch_size=256, device="cuda"):
-    """Crée les dataloaders pour la combinaison de toutes les tailles (ex: 64, 32, 16, 8 concaténés)"""
-    # Concaténation de toutes les échelles demandées
-    Z_tr_comb = torch.cat([Z_train_dict[s] for s in scales], dim=1).cpu().numpy()
-    Z_te_comb = torch.cat([Z_test_dict[s] for s in scales], dim=1).to(device)
-    y_train_np = y_train.cpu().numpy()
-    
-    Z_tr_split, Z_va_split, y_tr_split, y_va_split = train_test_split(
-        Z_tr_comb, y_train_np, test_size=0.2, random_state=42, stratify=y_train_np
-    )
-    
-    Z_tr = torch.tensor(Z_tr_split, device=device)
-    y_tr = torch.tensor(y_tr_split, dtype=torch.long, device=device)
-    Z_va = torch.tensor(Z_va_split, device=device)
-    y_va = torch.tensor(y_va_split, dtype=torch.long, device=device)
-    
-    tr_loader = DataLoader(TensorDataset(Z_tr, y_tr), batch_size=batch_size, shuffle=True)
-    va_loader = DataLoader(TensorDataset(Z_va, y_va), batch_size=batch_size, shuffle=False)
-    te_loader = DataLoader(TensorDataset(Z_te_comb, y_test.to(device)), batch_size=batch_size, shuffle=False)
-    
-    return tr_loader, va_loader, te_loader
 
 def create_raw_dataloaders(
     X_target, X_obs, X_pad, y, 
-    batch_size=64, # ⚠️ Attention : batch_size plus petit car Moirai consomme de la VRAM !
+    batch_size=64,
     device="cuda"
 ):
     X_target_np = X_target.cpu().numpy()
