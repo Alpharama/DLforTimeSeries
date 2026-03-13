@@ -7,6 +7,7 @@ from sklearn.model_selection import train_test_split
 from torch.utils.data import TensorDataset, DataLoader
 from tslearn.datasets import UCR_UEA_datasets
 from sklearn.preprocessing import LabelEncoder
+from sklearn.metrics import classification_report, accuracy_score, precision_recall_fscore_support
 
 
 
@@ -45,7 +46,166 @@ def get_z_loaders(encoder, tr_loader, va_loader, te_loader, head_batch_size=256,
     
     return tr_z_loader, va_z_loader, te_z_loader
 
+"""
+def grid_search_heads(
+    head_class, head_kwargs, train_loader_z, val_loader_z, test_loader_z, 
+    lr_grid=[1e-3, 1e-4], wd_grid=[0.01, 0.05], epochs=500, device="cuda"
+):
+    best_overall_val_loss = float('inf')
+    best_model = None
+    criterion = nn.CrossEntropyLoss()
+    
+    for wd in wd_grid:
+        for lr in lr_grid:
+            head = head_class(**head_kwargs).to(device)
+            optimizer = torch.optim.AdamW(head.parameters(), lr=lr, weight_decay=wd)
+            
+            best_val_loss_local = float('inf')
+            best_head_weights = None
+            epochs_no_improve = 0
+            patience = 20
+            
+            for epoch in range(epochs):
+                head.train()
+                for b_z, b_y in train_loader_z:
+                    b_z, b_y = b_z.to(device), b_y.to(device)
+                    optimizer.zero_grad()
+                    loss = criterion(head(b_z), b_y)
+                    loss.backward()
+                    optimizer.step()
+                    
+                head.eval()
+                total_val_loss, total = 0.0, 0
+                with torch.no_grad():
+                    for b_z, b_y in val_loader_z:
+                        b_z, b_y = b_z.to(device), b_y.to(device)
+                        loss = criterion(head(b_z), b_y)
+                        total_val_loss += loss.item() * b_y.size(0)
+                        total += b_y.size(0)
+                
+                avg_val_loss = total_val_loss / total
+                if avg_val_loss < best_val_loss_local:
+                    best_val_loss_local = avg_val_loss
+                    best_head_weights = copy.deepcopy(head.state_dict())
+                    epochs_no_improve = 0
+                else:
+                    epochs_no_improve += 1
+                    
+                if epochs_no_improve >= patience: break
+                    
+            if best_val_loss_local < best_overall_val_loss:
+                best_overall_val_loss = best_val_loss_local
+                head.load_state_dict(best_head_weights)
+                best_model = copy.deepcopy(head)
+                
+    best_model.eval()
+    
+    # --- NOUVEAU : Collecte de toutes les prédictions ---
+    all_preds = []
+    all_targets = []
+    
+    with torch.no_grad():
+        for b_z, b_y in test_loader_z:
+            b_z, b_y = b_z.to(device), b_y.to(device)
+            preds = torch.argmax(best_model(b_z), dim=-1)
+            
+            all_preds.extend(preds.cpu().numpy())
+            all_targets.extend(b_y.cpu().numpy())
+            
+    # --- Calcul et Affichage des Métriques Avancées ---
+    print("\n" + "-"*40)
+    print("📊 ÉVALUATION SUR LE TEST SET (HEADS)")
+    print("-" * 40)
+    print(classification_report(all_targets, all_preds, digits=4))
+    
+    metrics = {
+        "Accuracy": accuracy_score(all_targets, all_preds),
+        "Macro F1": f1_score(all_targets, all_preds, average="macro"),
+        "Weighted F1": f1_score(all_targets, all_preds, average="weighted")
+    }
+            
+    return best_model, metrics"""
 
+
+def grid_search_heads(
+    head_class, head_kwargs, train_loader_z, val_loader_z, test_loader_z, 
+    lr_grid=[1e-3, 1e-4], wd_grid=[0.01, 0.05], epochs=500, device="cuda",
+    patch_size=None  # <-- NOUVEL ARGUMENT
+):
+    best_overall_val_loss = float('inf')
+    best_model = None
+    criterion = nn.CrossEntropyLoss()
+    
+    for wd in wd_grid:
+        for lr in lr_grid:
+            head = head_class(**head_kwargs).to(device)
+            optimizer = torch.optim.AdamW(head.parameters(), lr=lr, weight_decay=wd)
+            
+            best_val_loss_local = float('inf')
+            best_head_weights = None
+            epochs_no_improve = 0
+            patience = 20
+            
+            for epoch in range(epochs):
+                head.train()
+                for b_z, b_y in train_loader_z:
+                    b_z, b_y = b_z.to(device), b_y.to(device)
+                    optimizer.zero_grad()
+                    loss = criterion(head(b_z), b_y)
+                    loss.backward()
+                    optimizer.step()
+                    
+                head.eval()
+                total_val_loss, total = 0.0, 0
+                with torch.no_grad():
+                    for b_z, b_y in val_loader_z:
+                        b_z, b_y = b_z.to(device), b_y.to(device)
+                        loss = criterion(head(b_z), b_y)
+                        total_val_loss += loss.item() * b_y.size(0)
+                        total += b_y.size(0)
+                
+                avg_val_loss = total_val_loss / total
+                if avg_val_loss < best_val_loss_local:
+                    best_val_loss_local = avg_val_loss
+                    best_head_weights = copy.deepcopy(head.state_dict())
+                    epochs_no_improve = 0
+                else:
+                    epochs_no_improve += 1
+                    
+                if epochs_no_improve >= patience: break
+                    
+            if best_val_loss_local < best_overall_val_loss:
+                best_overall_val_loss = best_val_loss_local
+                head.load_state_dict(best_head_weights)
+                best_model = copy.deepcopy(head)
+                
+    best_model.eval()
+    
+    # --- Collecte de toutes les prédictions ---
+    all_preds = []
+    all_targets = []
+    
+    with torch.no_grad():
+        for b_z, b_y in test_loader_z:
+            b_z, b_y = b_z.to(device), b_y.to(device)
+            preds = torch.argmax(best_model(b_z), dim=-1)
+            
+            all_preds.extend(preds.cpu().numpy())
+            all_targets.extend(b_y.cpu().numpy())
+            
+    # Logique conditionnelle selon le patch_size
+    metrics = {"Accuracy": accuracy_score(all_targets, all_preds)}
+
+    prec_macro, rec_macro, f1_macro, _ = precision_recall_fscore_support(all_targets, all_preds, average='macro', zero_division=0)
+    prec_weight, rec_weight, f1_weight, _ = precision_recall_fscore_support(all_targets, all_preds, average='weighted', zero_division=0)
+    
+    metrics.update({
+        "Macro Precision": prec_macro, "Macro Recall": rec_macro, "Macro F1": f1_macro,
+        "Weighted Precision": prec_weight, "Weighted Recall": rec_weight, "Weighted F1": f1_weight
+    })
+            
+    return best_model, metrics
+"""
 def grid_search_heads(
     head_class, head_kwargs, train_loader_z, val_loader_z, test_loader_z, 
     lr_grid=[1e-3, 1e-4], wd_grid=[0.01, 0.05], epochs=500, device="cuda"
@@ -107,12 +267,142 @@ def grid_search_heads(
             total += b_y.size(0)
             
     return best_model, correct / total
+"""
 
 
-
-
-
-
+def universal_grid_search(
+    model_class, 
+    model_kwargs, 
+    train_loader, 
+    val_loader, 
+    test_loader, 
+    lr_grid=[1e-4, 5e-5], 
+    wd_grid=[0.01, 0.05], 
+    epochs=500,
+    device="cuda",
+    verbose=False,
+    patch_size=None
+):
+    best_overall_val_loss = float('inf')
+    best_model = None
+    
+    for wd in wd_grid:
+        for lr in lr_grid:
+            print(f"LR={lr}| WD={wd}")
+            
+            model = model_class(**model_kwargs).to(device)
+            
+            val_loss, trained_model = train_finetune(
+                model=model, 
+                train_loader=train_loader, 
+                val_loader=val_loader,
+                lr=lr, 
+                epochs=epochs, 
+                weight_decay=wd, 
+                device=device,
+                verbose=verbose
+            )
+            
+            if val_loss < best_overall_val_loss:
+                best_overall_val_loss = val_loss
+                best_model = copy.deepcopy(trained_model)
+            print(f"Val Loss: {val_loss:.4f}")
+            
+    best_model.eval()
+    
+    all_preds = []
+    all_targets = []
+    
+    with torch.no_grad():
+        for b_t, b_o, b_p, b_y in test_loader:
+            b_t, b_o, b_p = b_t.to(device), b_o.to(device), b_p.to(device)
+            
+            logits = best_model(b_t, b_o, b_p)
+            predictions = torch.argmax(logits, dim=-1)
+            
+            all_preds.extend(predictions.cpu().numpy())
+            all_targets.extend(b_y.cpu().numpy())
+            
+    metrics = {"Accuracy": accuracy_score(all_targets, all_preds)}
+    
+    prec_macro, rec_macro, f1_macro, _ = precision_recall_fscore_support(all_targets, all_preds, average='macro', zero_division=0)
+    prec_weight, rec_weight, f1_weight, _ = precision_recall_fscore_support(all_targets, all_preds, average='weighted', zero_division=0)
+    
+    metrics.update({
+        "Macro Precision": prec_macro, "Macro Recall": rec_macro, "Macro F1": f1_macro,
+        "Weighted Precision": prec_weight, "Weighted Recall": rec_weight, "Weighted F1": f1_weight
+    })
+    
+    return best_model, metrics
+"""
+def universal_grid_search(
+    model_class, 
+    model_kwargs, 
+    train_loader, 
+    val_loader, 
+    test_loader, 
+    lr_grid=[1e-4, 5e-5], 
+    wd_grid=[0.01, 0.05], 
+    epochs=500,
+    device="cuda",
+    verbose = False
+):
+    best_overall_val_loss = float('inf')
+    best_model = None
+    
+    for wd in wd_grid:
+        for lr in lr_grid:
+            print(f"LR={lr}| WD={wd}")
+            
+            model = model_class(**model_kwargs).to(device)
+            
+            val_loss, trained_model = train_finetune(
+                model=model, 
+                train_loader=train_loader, 
+                val_loader=val_loader,
+                lr=lr, 
+                epochs=epochs, 
+                weight_decay=wd, 
+                device=device,
+                verbose = verbose
+            )
+            
+            if val_loss < best_overall_val_loss:
+                best_overall_val_loss = val_loss
+                best_model = copy.deepcopy(trained_model)
+            print(f"Val Loss: {val_loss:.4f}")
+            
+    best_model.eval()
+    
+    # --- NOUVEAU : Collecte de toutes les prédictions ---
+    all_preds = []
+    all_targets = []
+    
+    with torch.no_grad():
+        for b_t, b_o, b_p, b_y in test_loader:
+            b_t, b_o, b_p = b_t.to(device), b_o.to(device), b_p.to(device)
+            
+            logits = best_model(b_t, b_o, b_p)
+            predictions = torch.argmax(logits, dim=-1)
+            
+            all_preds.extend(predictions.cpu().numpy())
+            all_targets.extend(b_y.cpu().numpy())
+            
+    # --- Calcul et Affichage des Métriques Avancées ---
+    print("\n" + "-"*40)
+    print("📊 ÉVALUATION SUR LE TEST SET")
+    print("-"*40)
+    print(classification_report(all_targets, all_preds, digits=4))
+    
+    metrics = {
+        "Accuracy": accuracy_score(all_targets, all_preds),
+        "Macro F1": f1_score(all_targets, all_preds, average="macro"),
+        "Weighted F1": f1_score(all_targets, all_preds, average="weighted")
+    }
+    
+    return best_model, metrics
+"""
+"""
 
 def universal_grid_search(
     model_class, 
@@ -169,7 +459,7 @@ def universal_grid_search(
     print(f"Acc on Test Set : {test_acc:.4f}\n")
     
     return best_model, test_acc
-
+"""
 
 
 
