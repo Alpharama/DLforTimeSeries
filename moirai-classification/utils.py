@@ -3,6 +3,7 @@ import torch.nn as nn
 import torch.optim as optim
 import numpy as np
 import copy
+import random
 from sklearn.model_selection import train_test_split
 from torch.utils.data import TensorDataset, DataLoader
 from tslearn.datasets import UCR_UEA_datasets
@@ -10,6 +11,16 @@ from sklearn.preprocessing import LabelEncoder
 from sklearn.metrics import classification_report, accuracy_score, precision_recall_fscore_support
 
 
+SEED = 42
+
+def set_seed(seed: int = SEED) -> None:
+    """Set all random seeds for full reproducibility across runs."""
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
 
 
 NUM_VARS = 6
@@ -40,7 +51,9 @@ def get_z_loaders(encoder, tr_loader, va_loader, te_loader, head_batch_size=256,
     Z_va, y_va = process_loader(va_loader)
     Z_te, y_te = process_loader(te_loader)
     
-    tr_z_loader = DataLoader(TensorDataset(Z_tr, y_tr), batch_size=head_batch_size, shuffle=True)
+    _g = torch.Generator()
+    _g.manual_seed(SEED)
+    tr_z_loader = DataLoader(TensorDataset(Z_tr, y_tr), batch_size=head_batch_size, shuffle=True, generator=_g)
     va_z_loader = DataLoader(TensorDataset(Z_va, y_va), batch_size=head_batch_size, shuffle=False)
     te_z_loader = DataLoader(TensorDataset(Z_te, y_te), batch_size=head_batch_size, shuffle=False)
     
@@ -342,7 +355,9 @@ def create_raw_dataloaders(
     p_va = torch.tensor(X_pad_np[idx_va], device=device)
     y_va = torch.tensor(y_va, dtype=torch.long, device=device)
     
-    tr_loader = DataLoader(TensorDataset(t_tr, o_tr, p_tr, y_tr), batch_size=batch_size, shuffle=True)
+    _g = torch.Generator()
+    _g.manual_seed(SEED)
+    tr_loader = DataLoader(TensorDataset(t_tr, o_tr, p_tr, y_tr), batch_size=batch_size, shuffle=True, generator=_g)
     va_loader = DataLoader(TensorDataset(t_va, o_va, p_va, y_va), batch_size=batch_size, shuffle=False)
     
     return tr_loader, va_loader
