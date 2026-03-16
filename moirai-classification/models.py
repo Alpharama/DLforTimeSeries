@@ -12,163 +12,6 @@ def unfreeze_only_moirai_mask(encoder):
         if "mask" in name.lower():
             param.requires_grad = True
 
-class MultiScaleFullWrapper(nn.Module):
-    """
-    Wrapper pour le Full Fine-Tuning Multi-Échelles.
-    Instancie correctement 4 encodeurs Moirai (64, 32, 16, 8) et concatène leurs sorties.
-    """
-    def __init__(self, head_class, head_kwargs, num_vars=6, size="small", remove_last_patch=False):
-        super().__init__()
-        self.patch_sizes = [64, 32, 16, 8] 
-        self.num_vars = num_vars
-        self.remove_last_patch = remove_last_patch
-        
-        # Création correcte des 4 encodeurs Moirai indépendants
-        encoders_dict = {}
-        for p in self.patch_sizes:
-            # Il faut instancier le module HuggingFace pour chaque échelle
-            moirai_module = MoiraiModule.from_pretrained(f"Salesforce/moirai-1.1-R-{size}")
-            
-            enc = MoiraiEncoder(
-                module=moirai_module,
-                prediction_length=p,  # On suppose que DO_MASK=True, prediction_length = patch_size
-                context_length=36, 
-                patch_size=p, 
-                num_samples=100, 
-                target_dim=num_vars, 
-                feat_dynamic_real_dim=0, 
-                past_feat_dynamic_real_dim=0
-            )
-            encoders_dict[str(p)] = enc
-            
-        self.encoders = nn.ModuleDict(encoders_dict)
-        
-        # Initialisation de la tête (Flatten, Sequential ou Parallel)
-        self.head = head_class(**head_kwargs)
-
-    def forward(self, target, obs, pad):
-        features_list = []
-        
-        for p in self.patch_sizes:
-            # 1. Extraction des embeddings pour l'échelle courante
-            Z = self.encoders[str(p)](target, obs, pad)
-            
-            # 2. Retrait du masque (dernier patch) si demandé
-            if self.remove_last_patch:
-                B, S, F = Z.shape
-                P = S // self.num_vars
-                # Séparation pour enlever proprement le dernier patch de CHAQUE variable
-                Z_reshaped = Z.view(B, self.num_vars, P, F)
-                Z_no_mask = Z_reshaped[:, :, :-1, :]
-                Z = Z_no_mask.reshape(B, -1, F) # Retour à la shape (Batch, Seq, Features)
-                
-            features_list.append(Z)
-        
-        # 3. Concaténation sur la dimension de la séquence (dim=1)
-        # Forme résultante : (Batch, Seq_64 + Seq_32 + Seq_16 + Seq_8, Features)
-        concat_features = torch.cat(features_list, dim=1)
-        
-        # 4. Passage dans la tête multi-échelles
-        return self.head(concat_features)
-
-class MultiScaleSharedWrapper(nn.Module):
-    """
-    Wrapper pour le Full Fine-Tuning Multi-Échelles avec UN SEUL encodeur partagé.
-    Permet un gain massif de VRAM et force le modèle à apprendre une représentation universelle.
-    """
-    def __init__(self, head_class, head_kwargs, num_vars=6, size="small", remove_last_patch=False):
-        super().__init__()
-        self.patch_sizes = [64, 32, 16, 8] 
-        self.num_vars = num_vars
-        self.remove_last_patch = remove_last_patch
-        
-        # 1. On charge le Foundation Model UNE SEULE FOIS (Partage des poids)
-        shared_moirai = MoiraiModule.from_pretrained(f"Salesforce/moirai-1.1-R-{size}")
-        
-        # 2. On instancie 4 encodeurs qui pointent vers ce MÊME module
-        encoders_dict = {}
-        for p in self.patch_sizes:
-            enc = MoiraiEncoder(
-                module=shared_moirai, # <--- LA MAGIE EST ICI
-                prediction_length=p,  
-                context_length=36, 
-                patch_size=p, 
-                num_samples=100, 
-                target_dim=num_vars, 
-                feat_dynamic_real_dim=0, 
-                past_feat_dynamic_real_dim=0
-            )
-            encoders_dict[str(p)] = enc
-            
-        self.encoders = nn.ModuleDict(encoders_dict)
-        
-        # Initialisation de la tête
-        self.head = head_class(**head_kwargs)
-
-    def forward(self, target, obs, pad):
-        features_list = []
-        for p in self.patch_sizes:
-            # Extraction des embeddings pour l'échelle courante via l'encodeur partagé
-            Z = self.encoders[str(p)](target, obs, pad)
-            
-            # Retrait du masque si demandé
-            if self.remove_last_patch:
-                B, S, F = Z.shape
-                P = S // self.num_vars
-                Z_reshaped = Z.view(B, self.num_vars, P, F)
-                Z_no_mask = Z_reshaped[:, :, :-1, :]
-                Z = Z_no_mask.reshape(B, -1, F)
-                
-            features_list.append(Z)
-        
-        # Concaténation des 4 échelles
-        concat_features = torch.cat(features_list, dim=1)
-        
-        return self.head(concat_features)
-
-        
-class FlattenMultiScaleHead(nn.Module):
-    """
-    Tête Baseline : Fait un Mean Pooling sur les patchs de chaque échelle,
-    puis concatène (Flatten) le tout avant une couche linéaire.
-    """
-    def __init__(self, num_vars, num_classes, patches_counts, in_features=384):
-        super().__init__()
-        self.num_vars = num_vars
-        self.p_counts = patches_counts
-        
-        # Pour chaque échelle, on obtient (num_vars * in_features) après pooling
-        # Avec 4 échelles, l'entrée linéaire est 4 * num_vars * in_features
-        self.linear = nn.Linear(4 * num_vars * in_features, num_classes)
-        self.dropout = nn.Dropout(0.1)
-
-    def forward(self, x):
-        B = x.shape[0]
-        F = x.shape[-1]
-        
-        start = 0
-        pooled_list = []
-        
-        # Découpage du tenseur géant et pooling pour chaque échelle
-        for scale in [64, 32, 16, 8]:
-            length = self.num_vars * self.p_counts[scale]
-            x_scale = x[:, start : start + length, :]
-            start += length
-            
-            P = self.p_counts[scale]
-            x_reshaped = x_scale.view(B, self.num_vars, P, F)
-            
-            # Mean Pooling sur la dimension des patchs (dim=2)
-            pooled = x_reshaped.mean(dim=2).view(B, -1) 
-            pooled_list.append(pooled)
-            
-        # Concaténation des 4 représentations réduites
-        concat_pooled = torch.cat(pooled_list, dim=1)
-        return self.linear(self.dropout(concat_pooled))
-
-# Assure-toi d'importer ton MoiraiEncoder correctement
-# from encoder import MoiraiEncoder 
-
 class LoraHeadWrapper(nn.Module):
     def __init__(
         self, 
@@ -341,6 +184,133 @@ class MoiraiClassifier(nn.Module):
         return logits
 
 
+class DualHybridMeanPoolWrapper(nn.Module):
+    """
+    Dual encoder mean pooling: FullFT p8 + LoRA p64.
+
+    Architecture:
+      1. Fine encoder (patch 8, fully fine-tuned):
+         Produces Z_fine of shape (B, num_vars * P_fine, F).
+         Mean pooling over P_fine patches per variable → (B, num_vars, F).
+
+      2. Coarse encoder (patch 64, LoRA r=lora_r):
+         Produces Z_coarse of shape (B, num_vars * P_coarse, F).
+         Mean pooling over P_coarse patches per variable → (B, num_vars, F).
+
+      3. Concatenate fine and coarse mean-pooled representations per variable:
+         → (B, num_vars, 2*F), flattened to (B, num_vars * 2 * F).
+
+      4. Dropout → Linear → num_classes.
+    """
+    def __init__(self, num_classes, num_vars=6, size="small", lora_r=8, in_features=384):
+        super().__init__()
+        self.num_vars = num_vars
+        self.in_features = in_features
+
+        # Fine encoder: patch_size = 8, fully fine-tuned
+        self.encoder_fine = MoiraiEncoder(
+            module=MoiraiModule.from_pretrained(f"Salesforce/moirai-1.1-R-{size}"),
+            prediction_length=8, context_length=36, patch_size=8,
+            num_samples=100, target_dim=num_vars,
+            feat_dynamic_real_dim=0, past_feat_dynamic_real_dim=0,
+        )
+
+        # Coarse encoder: patch_size = 64, LoRA
+        enc_coarse = MoiraiEncoder(
+            module=MoiraiModule.from_pretrained(f"Salesforce/moirai-1.1-R-{size}"),
+            prediction_length=64, context_length=36, patch_size=64,
+            num_samples=100, target_dim=num_vars,
+            feat_dynamic_real_dim=0, past_feat_dynamic_real_dim=0,
+        )
+        self.encoder_coarse = get_peft_model(enc_coarse, LoraConfig(
+            r=lora_r, lora_alpha=lora_r * 2, target_modules="all-linear",
+        ))
+
+        self.dropout = nn.Dropout(0.1)
+        self.classifier = nn.Linear(num_vars * 2 * in_features, num_classes)
+
+    def forward(self, target, obs, pad):
+        B = target.shape[0]
+        F = self.in_features
+
+        Z_fine = self.encoder_fine(target, obs, pad)
+        P_fine = Z_fine.shape[1] // self.num_vars
+        Z_fine = Z_fine.view(B, self.num_vars, P_fine, F)
+        fine_pool = Z_fine.mean(dim=2)                        # (B, num_vars, F)
+
+        Z_coarse = self.encoder_coarse(target, obs, pad)
+        P_coarse = Z_coarse.shape[1] // self.num_vars
+        Z_coarse = Z_coarse.view(B, self.num_vars, P_coarse, F)
+        coarse_pool = Z_coarse.mean(dim=2)                    # (B, num_vars, F)
+
+        combined = torch.cat([fine_pool, coarse_pool], dim=2) # (B, num_vars, 2*F)
+        out = combined.view(B, -1)
+        return self.classifier(self.dropout(out))
+
+
+class DualHybridCoarseToFineWrapper(nn.Module):
+    """
+    Hybrid dual encoder cascade: LoRA p64 (coarse) + FullFT p8 (fine).
+
+    Architecture:
+      1. Coarse encoder (patch 64, LoRA): first patch per variable → query.
+      2. Fine encoder (patch 8, fully fine-tuned): all patches → key/value.
+      3. Cross-attention (coarse query → fine key/value) + residual.
+      4. Dropout → Linear → num_classes.
+    """
+    def __init__(self, num_classes, num_vars=6, size="small", lora_r=8, num_heads=4, in_features=384):
+        super().__init__()
+        self.num_vars = num_vars
+        self.in_features = in_features
+
+        # Coarse encoder: patch_size = 64 with LoRA
+        enc_coarse = MoiraiEncoder(
+            module=MoiraiModule.from_pretrained(f"Salesforce/moirai-1.1-R-{size}"),
+            prediction_length=64, context_length=36, patch_size=64,
+            num_samples=100, target_dim=num_vars,
+            feat_dynamic_real_dim=0, past_feat_dynamic_real_dim=0,
+        )
+        self.encoder_coarse = get_peft_model(enc_coarse, LoraConfig(
+            r=lora_r, lora_alpha=lora_r * 2, target_modules="all-linear",
+        ))
+
+        # Fine encoder: patch_size = 8, fully fine-tuned
+        self.encoder_fine = MoiraiEncoder(
+            module=MoiraiModule.from_pretrained(f"Salesforce/moirai-1.1-R-{size}"),
+            prediction_length=8, context_length=36, patch_size=8,
+            num_samples=100, target_dim=num_vars,
+            feat_dynamic_real_dim=0, past_feat_dynamic_real_dim=0,
+        )
+
+        self.cross_attn = nn.MultiheadAttention(
+            embed_dim=in_features, num_heads=num_heads, dropout=0.1, batch_first=True,
+        )
+        self.dropout = nn.Dropout(0.1)
+        self.classifier = nn.Linear(num_vars * in_features, num_classes)
+
+    def forward(self, target, obs, pad):
+        B = target.shape[0]
+        F = self.in_features
+
+        Z_coarse = self.encoder_coarse(target, obs, pad)
+        P_coarse = Z_coarse.shape[1] // self.num_vars
+        Z_coarse = Z_coarse.view(B, self.num_vars, P_coarse, F)
+        query = Z_coarse[:, :, 0, :]                          # (B, num_vars, F)
+
+        Z_fine = self.encoder_fine(target, obs, pad)
+        P_fine = Z_fine.shape[1] // self.num_vars
+        Z_fine = Z_fine.view(B, self.num_vars, P_fine, F)
+
+        q  = query.view(B * self.num_vars, 1, F)
+        kv = Z_fine.view(B * self.num_vars, P_fine, F)
+        enriched, _ = self.cross_attn(query=q, key=kv, value=kv)
+        enriched = enriched.squeeze(1).view(B, self.num_vars, F)
+        enriched = enriched + query                           # residual
+
+        out = enriched.view(B, -1)
+        return self.classifier(self.dropout(out))
+
+
 class MoiraiMaskTuner(nn.Module):
     """
     Modèle spécifique au Mask Tuning : 
@@ -355,7 +325,6 @@ class MoiraiMaskTuner(nn.Module):
         self.classifier = nn.Linear(num_vars * in_features, num_classes)
 
     def forward(self, past_target, past_observed_target, past_is_pad):
-        # 1. Extraction des embeddings
         Z = self.encoder(
             past_target=past_target,
             past_observed_target=past_observed_target,
@@ -365,12 +334,9 @@ class MoiraiMaskTuner(nn.Module):
         B, S, F = Z.shape
         P = S // self.num_vars
         
-        # 2. On isole les variables pour ne cibler QUE le dernier patch (le masque)
-        Z_reshaped = Z.view(B, self.num_vars, P, F) # .view() is fine here because Z is contiguous
-        mask_embeddings = Z_reshaped[:, :, -1, :]   # Slicing makes it non-contiguous!
+        Z_reshaped = Z.view(B, self.num_vars, P, F)
+        mask_embeddings = Z_reshaped[:, :, -1, :]
         
-        # 3. Aplatissement et classification directe
-        # 💡 SOLUTION: Use .reshape() instead of .view()
         final_repr = mask_embeddings.reshape(B, -1) 
         
         return self.classifier(self.dropout(final_repr))

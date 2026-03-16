@@ -3,12 +3,24 @@ import torch.nn as nn
 import torch.optim as optim
 import numpy as np
 import copy
+import random
 from sklearn.model_selection import train_test_split
 from torch.utils.data import TensorDataset, DataLoader
 from tslearn.datasets import UCR_UEA_datasets
 from sklearn.preprocessing import LabelEncoder
+from sklearn.metrics import classification_report, accuracy_score, precision_recall_fscore_support
 
 
+SEED = 42
+
+def set_seed(seed: int = SEED) -> None:
+    """Set all random seeds for full reproducibility across runs."""
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
 
 
 NUM_VARS = 6
@@ -39,7 +51,9 @@ def get_z_loaders(encoder, tr_loader, va_loader, te_loader, head_batch_size=256,
     Z_va, y_va = process_loader(va_loader)
     Z_te, y_te = process_loader(te_loader)
     
-    tr_z_loader = DataLoader(TensorDataset(Z_tr, y_tr), batch_size=head_batch_size, shuffle=True)
+    _g = torch.Generator()
+    _g.manual_seed(SEED)
+    tr_z_loader = DataLoader(TensorDataset(Z_tr, y_tr), batch_size=head_batch_size, shuffle=True, generator=_g)
     va_z_loader = DataLoader(TensorDataset(Z_va, y_va), batch_size=head_batch_size, shuffle=False)
     te_z_loader = DataLoader(TensorDataset(Z_te, y_te), batch_size=head_batch_size, shuffle=False)
     
@@ -48,7 +62,7 @@ def get_z_loaders(encoder, tr_loader, va_loader, te_loader, head_batch_size=256,
 
 def grid_search_heads(
     head_class, head_kwargs, train_loader_z, val_loader_z, test_loader_z, 
-    lr_grid=[1e-3, 1e-4], wd_grid=[0.01, 0.05], epochs=500, device="cuda"
+    lr_grid=[1e-3, 1e-4], wd_grid=[0.01, 0.05], epochs=500, device="cuda",
 ):
     best_overall_val_loss = float('inf')
     best_model = None
@@ -98,20 +112,30 @@ def grid_search_heads(
                 best_model = copy.deepcopy(head)
                 
     best_model.eval()
-    correct, total = 0, 0
+    
+    all_preds = []
+    all_targets = []
+    
     with torch.no_grad():
         for b_z, b_y in test_loader_z:
             b_z, b_y = b_z.to(device), b_y.to(device)
             preds = torch.argmax(best_model(b_z), dim=-1)
-            correct += (preds == b_y).sum().item()
-            total += b_y.size(0)
             
-    return best_model, correct / total
+            all_preds.extend(preds.cpu().numpy())
+            all_targets.extend(b_y.cpu().numpy())
+            
+    # Logique conditionnelle selon le patch_size
+    metrics = {"Accuracy": accuracy_score(all_targets, all_preds)}
 
-
-
-
-
+    prec_macro, rec_macro, f1_macro, _ = precision_recall_fscore_support(all_targets, all_preds, average='macro', zero_division=0)
+    prec_weight, rec_weight, f1_weight, _ = precision_recall_fscore_support(all_targets, all_preds, average='weighted', zero_division=0)
+    
+    metrics.update({
+        "Macro Precision": prec_macro, "Macro Recall": rec_macro, "Macro F1": f1_macro,
+        "Weighted Precision": prec_weight, "Weighted Recall": rec_weight, "Weighted F1": f1_weight
+    })
+            
+    return best_model, metrics
 
 
 def universal_grid_search(
@@ -124,15 +148,15 @@ def universal_grid_search(
     wd_grid=[0.01, 0.05], 
     epochs=500,
     device="cuda",
-    verbose = False
+    verbose=False,
+    patch_size=None
 ):
     best_overall_val_loss = float('inf')
     best_model = None
     
-    
     for wd in wd_grid:
         for lr in lr_grid:
-            print(f"LR={lr} | WD={wd}")
+            print(f"LR={lr}| WD={wd}")
             
             model = model_class(**model_kwargs).to(device)
             
@@ -150,38 +174,34 @@ def universal_grid_search(
             if val_loss < best_overall_val_loss:
                 best_overall_val_loss = val_loss
                 best_model = copy.deepcopy(trained_model)
-                print(f"Val Loss: {val_loss:.4f}")
+            print(f"Val Loss: {val_loss:.4f}")
             
     best_model.eval()
-    correct, total = 0, 0
+    
+    all_preds = []
+    all_targets = []
     
     with torch.no_grad():
         for b_t, b_o, b_p, b_y in test_loader:
-            b_t, b_o, b_p, b_y = b_t.to(device), b_o.to(device), b_p.to(device), b_y.to(device)
+            b_t, b_o, b_p = b_t.to(device), b_o.to(device), b_p.to(device)
             
             logits = best_model(b_t, b_o, b_p)
             predictions = torch.argmax(logits, dim=-1)
             
-            correct += (predictions == b_y).sum().item()
-            total += b_y.size(0)
+            all_preds.extend(predictions.cpu().numpy())
+            all_targets.extend(b_y.cpu().numpy())
             
-    test_acc = correct / total
-    print(f"Acc on Test Set : {test_acc:.4f}\n")
+    metrics = {"Accuracy": accuracy_score(all_targets, all_preds)}
     
-    return best_model, test_acc
-
-
-
-
-
-
-
-def unfreeze_only_moirai_mask(encoder):
-    for param in encoder.parameters():
-        param.requires_grad = False
-    for name, param in encoder.named_parameters():
-        if "mask" in name.lower():
-            param.requires_grad = True
+    prec_macro, rec_macro, f1_macro, _ = precision_recall_fscore_support(all_targets, all_preds, average='macro', zero_division=0)
+    prec_weight, rec_weight, f1_weight, _ = precision_recall_fscore_support(all_targets, all_preds, average='weighted', zero_division=0)
+    
+    metrics.update({
+        "Macro Precision": prec_macro, "Macro Recall": rec_macro, "Macro F1": f1_macro,
+        "Weighted Precision": prec_weight, "Weighted Recall": rec_weight, "Weighted F1": f1_weight
+    })
+    
+    return best_model, metrics
 
 
 def get_lsst_dataloaders(batch_size, device="cuda"):
@@ -212,13 +232,10 @@ def get_lsst_dataloaders(batch_size, device="cuda"):
 
 def apply_pooling_pt(Z_tensor, method, num_vars=NUM_VARS):
     N, S, F = Z_tensor.shape
-    P = S // num_vars # Calcul automatique du nombre de patches par variable
-    
-    # On reshape le tenseur pour séparer les Variables et les Patches
-    # Forme résultante : (Batch, Variables, Patches, Features)
+    P = S // num_vars 
+
     Z_reshaped = Z_tensor.view(N, num_vars, P, F)
     
-    # Basique et Global
     if method == "flatten":
         return Z_tensor.reshape(N, -1)
         
@@ -238,8 +255,6 @@ def apply_pooling_pt(Z_tensor, method, num_vars=NUM_VARS):
             Z_tensor.min(dim=1).values
         ], dim=1)
 
-    # Pooling sur les Patches (on garde les variables distinctes) ---
-    # Réduction sur la dimension 2 (Patches). Résultat : (N, num_vars, F), puis on aplatit
     elif method == "mean_over_patches":
         return Z_reshaped.mean(dim=2).reshape(N, -1)
         
@@ -255,8 +270,6 @@ def apply_pooling_pt(Z_tensor, method, num_vars=NUM_VARS):
         p_min  = Z_reshaped.min(dim=2).values.reshape(N, -1)
         return torch.cat([p_mean, p_max, p_min], dim=1)
 
-    # Pooling sur les Variables (on synchronise les patches entre variables) ---
-    # Réduction sur la dimension 1 (Variables). Résultat : (N, P, F), puis on aplatit
     elif method == "mean_over_variables":
         return Z_reshaped.mean(dim=1).reshape(N, -1)
         
@@ -312,107 +325,11 @@ def preprocess_data(
 
     return past_target, past_observed_target, past_is_pad
 
-# ==========================================
-# 1. FONCTIONS D'ENTRAÎNEMENT
-# ==========================================
-def train(
-    model, train_loader, val_loader, lr, 
-    epochs=100, weight_decay=0.005, device="cuda"
-):
-    model.to(device)
-    criterion = nn.CrossEntropyLoss()
-    optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
-    
-    patience = 50
-    epochs_no_improve = 0
-    best_avg_val_loss = float('inf')
-    best_model_weights = copy.deepcopy(model.state_dict())
-    
-    for epoch in range(epochs):
-        model.train()
-        for batch_z, batch_y in train_loader:
-            batch_z, batch_y = batch_z.to(device), batch_y.to(device)
-            optimizer.zero_grad()
-            logits = model(batch_z)
-            loss = criterion(logits, batch_y)
-            loss.backward()
-            optimizer.step()
 
-        model.eval()
-        total_val_loss = 0.0
-        total = 0
-        
-        with torch.no_grad():
-            for batch_z, batch_y in val_loader:
-                batch_z, batch_y = batch_z.to(device), batch_y.to(device)
-                logits = model(batch_z)
-                loss = criterion(logits, batch_y)
-                total_val_loss += loss.item() * batch_y.size(0)
-                total += batch_y.size(0)
-                
-        avg_val_loss = total_val_loss / total
-        
-        # Early stopping logic
-        if avg_val_loss < best_avg_val_loss:
-            best_avg_val_loss = avg_val_loss
-            best_model_weights = copy.deepcopy(model.state_dict())
-            epochs_no_improve = 0
-        else:
-            epochs_no_improve += 1
-            
-        if epochs_no_improve >= patience:
-            # print(f'Early stop at epoch {epoch}') # Décommenter pour debug
-            break
-            
-    model.load_state_dict(best_model_weights)
-    return best_avg_val_loss, model
-
-
-def create_single_scale_dataloaders(Z_train, Z_test, y_train, y_test, batch_size=256, device="cuda"):
-    """Crée les dataloaders pour une seule taille de patch (ex: juste 16)"""
-    Z_train_np = Z_train.cpu().numpy()
-    y_train_np = y_train.cpu().numpy()
-    
-    Z_tr_split, Z_va_split, y_tr_split, y_va_split = train_test_split(
-        Z_train_np, y_train_np, test_size=0.2, random_state=42, stratify=y_train_np
-    )
-    
-    Z_tr = torch.tensor(Z_tr_split, device=device)
-    y_tr = torch.tensor(y_tr_split, dtype=torch.long, device=device)
-    Z_va = torch.tensor(Z_va_split, device=device)
-    y_va = torch.tensor(y_va_split, dtype=torch.long, device=device)
-    
-    tr_loader = DataLoader(TensorDataset(Z_tr, y_tr), batch_size=batch_size, shuffle=True)
-    va_loader = DataLoader(TensorDataset(Z_va, y_va), batch_size=batch_size, shuffle=False)
-    te_loader = DataLoader(TensorDataset(Z_test.to(device), y_test.to(device)), batch_size=batch_size, shuffle=False)
-    
-    return tr_loader, va_loader, te_loader
-
-def create_all_scales_dataloaders(Z_train_dict, Z_test_dict, scales, y_train, y_test, batch_size=256, device="cuda"):
-    """Crée les dataloaders pour la combinaison de toutes les tailles (ex: 64, 32, 16, 8 concaténés)"""
-    # Concaténation de toutes les échelles demandées
-    Z_tr_comb = torch.cat([Z_train_dict[s] for s in scales], dim=1).cpu().numpy()
-    Z_te_comb = torch.cat([Z_test_dict[s] for s in scales], dim=1).to(device)
-    y_train_np = y_train.cpu().numpy()
-    
-    Z_tr_split, Z_va_split, y_tr_split, y_va_split = train_test_split(
-        Z_tr_comb, y_train_np, test_size=0.2, random_state=42, stratify=y_train_np
-    )
-    
-    Z_tr = torch.tensor(Z_tr_split, device=device)
-    y_tr = torch.tensor(y_tr_split, dtype=torch.long, device=device)
-    Z_va = torch.tensor(Z_va_split, device=device)
-    y_va = torch.tensor(y_va_split, dtype=torch.long, device=device)
-    
-    tr_loader = DataLoader(TensorDataset(Z_tr, y_tr), batch_size=batch_size, shuffle=True)
-    va_loader = DataLoader(TensorDataset(Z_va, y_va), batch_size=batch_size, shuffle=False)
-    te_loader = DataLoader(TensorDataset(Z_te_comb, y_test.to(device)), batch_size=batch_size, shuffle=False)
-    
-    return tr_loader, va_loader, te_loader
 
 def create_raw_dataloaders(
     X_target, X_obs, X_pad, y, 
-    batch_size=64, # ⚠️ Attention : batch_size plus petit car Moirai consomme de la VRAM !
+    batch_size=64,
     device="cuda"
 ):
     X_target_np = X_target.cpu().numpy()
@@ -438,7 +355,9 @@ def create_raw_dataloaders(
     p_va = torch.tensor(X_pad_np[idx_va], device=device)
     y_va = torch.tensor(y_va, dtype=torch.long, device=device)
     
-    tr_loader = DataLoader(TensorDataset(t_tr, o_tr, p_tr, y_tr), batch_size=batch_size, shuffle=True)
+    _g = torch.Generator()
+    _g.manual_seed(SEED)
+    tr_loader = DataLoader(TensorDataset(t_tr, o_tr, p_tr, y_tr), batch_size=batch_size, shuffle=True, generator=_g)
     va_loader = DataLoader(TensorDataset(t_va, o_va, p_va, y_va), batch_size=batch_size, shuffle=False)
     
     return tr_loader, va_loader
