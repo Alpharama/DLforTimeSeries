@@ -1,7 +1,7 @@
 [project]
 name = "moirai-classification"
 version = "0.1.0"
-description = "Add your description here"
+description = "Classification for time-series built on Moirai time-series foundation models."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
