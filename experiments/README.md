@@ -1,89 +1,95 @@
-# Moirai for Time Series Classification
+# Experiments - Moirai Classification
 
-Adapting the [Moirai](https://github.com/SalesforceAIResearch/uni2ts) foundation model (Salesforce AI Research) for time series classification on the [UCR LSST dataset](https://www.timeseriesclassification.com/description.php?Dataset=LSST).
+This directory contains the **experimental notebooks used to evaluate Moirai representations for time-series classification** on the **UCR LSST dataset**.
 
-The project systematically explores strategies ranging from a fully frozen encoder to full fine-tuning, including parameter-efficient methods (LoRA/AdaLoRA).
+The experiments progressively explore different ways to adapt the **pretrained Moirai encoder** for classification, ranging from frozen feature extraction to full fine-tuning.
 
 ---
 
-## Structure
+# Notebook Overview
+
+The experiments follow a **progressive adaptation pipeline**, starting from simple baselines and gradually increasing model complexity.
+
+| Notebook                              | Description                                             |
+| ------------------------------------- | ------------------------------------------------------- |
+| `data_explo.ipynb`                    | Exploration of the LSST dataset                         |
+| `00_baseline.ipynb`                   | Classical baselines on raw data                         |
+| `01_basic_pooling.ipynb`              | Frozen encoder + classical ML on pooled representations |
+| `02_heads_on_frozen_encoder.ipynb`    | Frozen encoder + learnable classification heads         |
+| `03_mask_finetuning_with_heads.ipynb` | Fine-tuning mask embeddings only                        |
+| `04_full_finetuning_end_to_end.ipynb` | End-to-end fine-tuning of encoder + head                |
+| `05_lora_finetuning.ipynb`            | Parameter-efficient fine-tuning (LoRA / AdaLoRA / DoRA) |
+| `06_heatmap_analysis.ipynb`           | Visualization and comparison of results                 |
+| `07_repeated_comparison.ipynb`        | Repeated runs for statistical comparison                |
+| `moirai_encoder.ipynb`                | Inspection of Moirai encoder representations            |
+
+---
+
+# Experiment Progression
+
+The experiments gradually increase the **number of trainable parameters**.
+
+| Stage                | Strategy                                              |
+| -------------------- | ----------------------------------------------------- |
+| Baselines            | Classical ML models on raw time series                |
+| Feature extraction   | Frozen Moirai encoder                                 |
+| Head training        | Train classification heads on encoder representations |
+| Partial adaptation   | Fine-tune mask embeddings                             |
+| Full adaptation      | End-to-end encoder fine-tuning                        |
+| Efficient adaptation | LoRA / AdaLoRA / DoRA                                 |
+
+This setup allows systematic evaluation of:
+
+* pooling strategies
+* attention-based aggregation heads
+* patch resolutions
+* fine-tuning regimes
+
+---
+
+# Dataset
+
+Experiments are conducted on **UCR LSST**:
+
+* 6 variables (photometric bands)
+* 36 time steps
+* 14 classes
+
+Patch sizes evaluated:
 
 ```
-moirai-classification/
-├── encoder.py       # MoiraiEncoder: extracts token-level embeddings from Moirai
-├── heads.py         # Classification head architectures (pooling, attention, hierarchical)
-├── models.py        # Wrappers combining encoder + head for each training strategy
-├── utils.py         # Data loading, training loop, grid search, metrics
-│
-├── 01_basic_pooling.ipynb              # Frozen encoder + classical ML (Ridge, RF)
-├── 02_heads_on_frozen_encoder.ipynb    # Frozen encoder + learnable classification heads
-├── 03_mask_finetuning_with_heads.ipynb # Fine-tune mask embedding only + head
-├── 04_full_finetuning_end_to_end.ipynb # Full encoder fine-tuning + head
-├── 05_lora_finetuning.ipynb            # LoRA / AdaLoRA / DoRA fine-tuning + head
-├── 06_heatmap_analysis.ipynb           # Results visualization (heatmaps)
-├── 07_repeated_comparison.ipynb        # Statistical comparison across best methods
-│
-├── results_csv/     # Experiment outputs: CSV metrics + heatmap PNGs
-├── pyproject.toml   # Dependencies (managed with uv)
-└── uv.lock
+8 / 16 / 32 / 64
 ```
 
 ---
 
-## Setup
+# Results
 
-```bash
-uv sync
-source .venv/bin/activate
-```
-
----
-
-## Experiments
-
-The notebooks follow a progression from cheapest to most expensive adaptation strategy:
-
-| Notebook | Strategy | Trainable params |
-|----------|----------|-----------------|
-| `01` | Frozen encoder + classical ML (Ridge, RF) | 0 |
-| `02` | Frozen encoder + learnable head | head only |
-| `03` | Mask embedding fine-tuning + head | mask + head |
-| `04` | Full encoder fine-tuning + head | all |
-| `05` | LoRA / AdaLoRA / DoRA + head | low-rank adapters + head |
-| `06` | Results analysis | — |
-| `07` | Repeated runs & statistical comparison | — |
-
----
-
-## Dataset
-
-- **UCR LSST** — 6-variate time series, 36 timesteps
-- Patch sizes tested: 8, 16, 32, 64
-
----
-
-## Encoder design
-
-`MoiraiEncoder` reuses Moirai's preprocessing and transformer layers but drops the forecasting head, returning token-level representations instead of a distribution:
+All experiment outputs are saved in:
 
 ```
-Input:  (batch, time, variate)
-Output: (batch, num_tokens, d_model)   # d_model = 384 for moirai-small
+results_csv/
 ```
 
-The original Moirai forward pass has 6 steps. The encoder keeps steps 1–4 and drops 5–6:
+This directory contains:
 
-1. Scale observations
-2. Project observations → representations
-3. Replace prediction window with learnable mask
-4. Apply transformer layers
-5. ~~Project representations → distribution parameters~~ (dropped)
-6. ~~Return distribution~~ (dropped)
+* experiment metrics (CSV)
+* aggregated results
+* heatmap visualizations
 
 ---
 
-## References
+# Reference
 
-- **uni2ts** (Salesforce AI Research): https://github.com/SalesforceAIResearch/uni2ts
-- **Moirai checkpoint** (Hugging Face): https://huggingface.co/Salesforce/moirai-1.1-R-small
-- **Key source files**: `uni2ts/model/moirai/forecast.py`, `uni2ts/model/moirai/module.py`
+The experiments build on the **Moirai encoder** from
+**[uni2ts](https://github.com/SalesforceAIResearch/uni2ts)** (Salesforce AI Research).
+
+---
+
+### Why this version is better
+
+* reflects the **real notebook structure**
+* explains the **experiment logic**
+* shorter and clearer
+* reads like a **proper experiment folder README**
+
