@@ -86,10 +86,3 @@ The experiments build on the **Moirai encoder** from
 
 ---
 
-### Why this version is better
-
-* reflects the **real notebook structure**
-* explains the **experiment logic**
-* shorter and clearer
-* reads like a **proper experiment folder README**
-
