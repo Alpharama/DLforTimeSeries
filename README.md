@@ -51,6 +51,17 @@ Classification is evaluated on the **LSST dataset** using pretrained Moirai enco
 - Mean pooling is a strong baseline for patch aggregation.
 - Multi-scale patch representations improve results.
 - LoRA fine-tuning outperforms frozen encoders.
+
+---
+
+## Experiments
+
+All experiments used in the project are available in the `experiments/` directory.
+
+The notebooks reproduce the evaluation of different pooling strategies, patch scales, and fine-tuning regimes on the LSST dataset.
+
+See **[experiments/README.md](experiments/README.md)** for details about the experimental setup and notebook structure.
+
 ---
 
 ## Installation
