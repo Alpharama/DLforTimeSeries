@@ -6,7 +6,7 @@ from .data_loader import (
     get_lsst_dataloaders,
     get_z_loaders,
 )
-from .utils import set_seed, apply_pooling_pt
+from .utils import set_seed, apply_pooling_pt, POOLING_METHODS
 
 __all__ = [
     "train_finetune",
@@ -18,4 +18,5 @@ __all__ = [
     "get_z_loaders",
     "set_seed",
     "apply_pooling_pt",
+    "POOLING_METHODS",
 ]
